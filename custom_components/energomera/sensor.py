@@ -1,155 +1,303 @@
 import logging
 import serial
 import time
-from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.event import async_track_time_interval
-from datetime import timedelta
 import re
-from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
+import voluptuous as vol
+import serial.tools.list_ports
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.core import HomeAssistant
+
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import (
+    CONF_NAME,
+    CONF_UNIT_OF_MEASUREMENT,
+    CONF_SCAN_INTERVAL,
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfElectricPotential,
+    UnitOfElectricCurrent,
+    UnitOfFrequency,
+)
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorStateClass,
+)
+
+from .const import (
+    DOMAIN,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_PORT,
+    CONF_SENSORS,
+    CONF_PORT,
+    CONF_PRECISION,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# Example sensor entity to handle meter data
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Setup the sensor platform."""
-    scan_interval = config.get("scan_interval", DEFAULT_SCAN_INTERVAL)
-    meter = MeterConnection()
-    sensors = [
-        MeterSensor(meter, "Voltage_energomera", "U", "V", "mdi:flash"),
-        MeterSensor(meter, "Current_energomera", "I", "A", "mdi:current-ac"),
-        MeterSensor(meter, "Power_energomera", "P", "kW", "mdi:power"),
-        MeterSensor(meter, "Frequency_energomera", "F", "Hz", "mdi:sine-wave"),
-        MeterSensor(meter, "Total Energy_energomera", "T", "kWh", "mdi:counter"),
-    ]
+# types sensors and commands
+SENSOR_TYPES = {
+    "voltage": {
+        "name": "Voltage",
+        "command": b'\x01\x52\x31\x02\x56\x4F\x4C\x54\x41\x28\x29\x03\x5F',
+        "regex": r'VOLTA\(([\d.]+)\)',
+        "unit": UnitOfElectricPotential.VOLT,
+        "device_class": SensorDeviceClass.VOLTAGE,
+    },
+    "current": {
+        "name": "Current",
+        "command": b'\x01\x52\x31\x02\x43\x55\x52\x52\x45\x28\x29\x03\x5A',
+        "regex": r'CURRE\(([\d.]+)\)',
+        "unit": UnitOfElectricCurrent.AMPERE,
+        "device_class": SensorDeviceClass.CURRENT,
+    },
+    "power": {
+        "name": "Power",
+        "command": b'\x01\x52\x31\x02\x50\x4F\x57\x45\x50\x28\x29\x03\x64',
+        "regex": r'POWEP\(([\d.]+)\)',
+        "unit": UnitOfPower.KILO_WATT,
+        "device_class": SensorDeviceClass.POWER,
+    },
+    "frequency": {
+        "name": "Frequency",
+        "command": b'\x01\x52\x31\x02\x46\x52\x45\x51\x55\x28\x29\x03\x5C',
+        "regex": r'FREQU\(([\d.]+)\)',
+        "unit": UnitOfFrequency.HERTZ,
+        "device_class": SensorDeviceClass.FREQUENCY,
+    },
+    "total_energy": {
+        "name": "Total Energy",
+        "command": b'\x01\x52\x31\x02\x45\x54\x30\x50\x45\x28\x29\x03\x37',
+        "regex": r'ET0PE\(([\d.]+)\)',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+}
 
-    async_add_entities(sensors)
 
-    async def update_data(event_time):
-        """Fetch new data from the meter and update sensors."""
-        meter.update()
-        for sensor in sensors:
-            sensor.async_schedule_update_ha_state(True)
+SENSOR_SCHEMA = vol.Schema(
+    {
+        vol.Required("type"): vol.In(SENSOR_TYPES.keys()),
+        vol.Optional(CONF_NAME): cv.string,
+        vol.Optional("friendly_name"): cv.string,
+        vol.Optional("unique_id"): cv.string,
+        vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
+        vol.Optional(CONF_PRECISION, default=2): cv.positive_int,
+    }
+)
 
-    # Schedule periodic updates
-    async_track_time_interval(hass, update_data, timedelta(seconds=scan_interval))
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_PORT, default=DEFAULT_PORT): cv.string,
+        vol.Required(CONF_SENSORS): vol.All(cv.ensure_list, [SENSOR_SCHEMA]),
+        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
+    }
+)
 
 
-class MeterSensor(Entity):
-    """Representation of a Meter Sensor."""
+async def async_setup_platform(
+        hass: HomeAssistant,
+        config: ConfigType,
+        async_add_entities,
+        discovery_info=None,
+):
+    """Set up the Energomera Meter sensor platform."""
+    port = config[CONF_PORT]
+    scan_interval = config[CONF_SCAN_INTERVAL]
+    sensors = config[CONF_SENSORS]
 
-    def __init__(self, meter, name, attr, unit, icon):
+    meter = MeterConnection(port)
+    entities = []
+    for sensor_conf in sensors:
+        sensor_type = sensor_conf["type"]
+        sensor_info = SENSOR_TYPES[sensor_type]
+
+        name = sensor_conf.get(CONF_NAME, sensor_info["name"])
+        friendly_name = sensor_conf.get("friendly_name", name)
+        unique_id = sensor_conf.get("unique_id")
+        unit = sensor_conf.get(CONF_UNIT_OF_MEASUREMENT, sensor_info["unit"])
+        device_class = sensor_info["device_class"]
+        state_class = SensorStateClass.MEASUREMENT
+        precision = sensor_conf.get(CONF_PRECISION)
+
+        entities.append(
+            EnergomeraSensor(
+                meter,
+                name,
+                friendly_name,
+                unique_id,
+                sensor_info["command"],
+                sensor_info["regex"],
+                unit,
+                device_class,
+                state_class,
+                precision,
+            )
+        )
+
+    async_add_entities(entities)
+
+    async def async_update_data(now):
+        """Fetch data from the meter."""
+        await hass.async_add_executor_job(meter.update)
+        for entity in entities:
+            entity.async_schedule_update_ha_state(True)
+
+    # Schedule updates
+    async_track_time_interval(hass, async_update_data, scan_interval)
+
+
+class EnergomeraSensor(SensorEntity):
+    """Representation of a Energomera Sensor."""
+
+    def __init__(
+            self,
+            meter,
+            name,
+            friendly_name,
+            unique_id,
+            command,
+            regex,
+            unit,
+            device_class,
+            state_class,
+            precision,
+    ):
         """Initialize the sensor."""
         self._meter = meter
         self._name = name
-        self._attr = attr
-        self._state = None
+        self._friendly_name = friendly_name
+        self._unique_id = unique_id
+        self._command = command
+        self._regex = regex
         self._unit = unit
-        self._icon = icon
-
+        self._device_class = device_class
+        self._state_class = state_class
+        self._precision = precision
+        self._state = None
+        _LOGGER.warning(f'init class EnergomeraSensor')
     @property
     def name(self):
         """Return the name of the sensor."""
         return self._name
 
     @property
-    def state(self):
-        """Return the state of the sensor."""
-        return getattr(self._meter, self._attr, None)
+    def friendly_name(self):
+        """Return the friendly name of the sensor."""
+        return self._friendly_name
 
     @property
-    def unit_of_measurement(self):
+    def unique_id(self):
+        """Return the unique ID of the sensor."""
+        return self._unique_id
+
+    @property
+    def state(self):
+        """Return the state of the sensor."""
+        return self._state
+
+    @property
+    def native_unit_of_measurement(self):
         """Return the unit of measurement."""
         return self._unit
 
     @property
-    def icon(self):
-        """Return the icon to use in the frontend."""
-        return self._icon
+    def device_class(self):
+        """Return the device class."""
+        return self._device_class
+
+    @property
+    def state_class(self):
+        """Return the state class."""
+        return self._state_class
 
     def update(self):
-        """Fetch data from the meter."""
-        self._meter.update()
+        """Fetch new state data for the sensor."""
+        self._meter.execute_open_session()
+
+        response = self._meter.send_command(self._command)
+        _LOGGER.debug(f"Command for sensor {self._command}")
+        _LOGGER.debug(f"len of command - {response}")
+        if response:
+            match = re.search(self._regex, response)
+            if match:
+                self._state = round(float(match.group(1)), self._precision)
+            else:
+                _LOGGER.warning("No matching data for sensor %s", self._name)
+        else:
+            _LOGGER.warning("No response for sensor %s", self._name)
+
+        # Закрываем сессию после завершения считывания данных
+        self._meter.execute_close_session()
 
 
 class MeterConnection:
-    """Handle connection to the meter and retrieve data."""
+    """Handle communication with the Energomera meter."""
+    state_session = False
 
-    def __init__(self):
-        self.U = None  # Voltage
-        self.I = None  # Current
-        self.P = None  # Power
-        self.F = None  # Frequency
-        self.T = None  # Total energy
-
+    def __init__(self, port):
+        self.port = port
         self.serial_conn = self.init_serial_connection()
+        _LOGGER.warning(f'init class meterConnection')
 
     def init_serial_connection(self):
-        """Initialize and return a serial connection to the meter."""
-        serial_port = self.find_port()
-        if not serial_port:
-            raise Exception("No valid serial port found.")
-        ser = serial.Serial(
-            port=serial_port,
-            baudrate=9600,
-            parity=serial.PARITY_EVEN,
-            stopbits=serial.STOPBITS_ONE,
-            bytesize=serial.SEVENBITS,
-            timeout=1
-        )
-        return ser
+        """Initialize serial connection to the meter."""
+        try:
+            ser = serial.Serial(
+                port=self.port,
+                baudrate=9600,
+                bytesize=serial.SEVENBITS,
+                parity=serial.PARITY_EVEN,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=2
+            )
+            return ser
+        except serial.SerialException as e:
+            _LOGGER.error("Error opening serial port %s: %s", self.port, e)
+            return None
 
-    def find_port(self):
-        """Find and return the correct serial port."""
-        ports = serial.tools.list_ports.comports()
-        for port in ports:
-            # if port.device == 'COM2':  # Adjust this to match your setup
-            return port.device
-        return None
+    def send_command(self, command, expected_len=100):
+        """Send a command to the meter and return the response."""
+        if not self.serial_conn:
+            return None
 
-    def update(self):
-        """Update the meter data by sending requests and receiving responses."""
+        try:
+            self.serial_conn.write(command)
+            time.sleep(0.3)  # Небольшая задержка для получения ответа
+            response = self.serial_conn.read(expected_len).decode('ascii')
+            _LOGGER.debug(f'Sent command: {command}')
+            _LOGGER.debug(f'Received response: {response}')
+            return response
+        except serial.SerialTimeoutException:
+            _LOGGER.error("Timeout communicating with meter")
+            return None
+
+    def execute_open_session(self):
+        """Open the session with the meter and authenticate."""
+        _LOGGER.debug("Opening session with the meter")
         requests = [
             (b'\x2F\x3F\x21\x0D\x0A', 17),  # Open session
             (b'\x06\x30\x35\x31\x0D\x0A', 11),  # .051..
             (b'\x01\x50\x31\x02\x28\x37\x37\x37\x37\x37\x37\x29\x03\x21', 1),  # Auth
-            (b'\x01\x52\x31\x02\x56\x4F\x4C\x54\x41\x28\x29\x03\x5F', 19),  # Voltage
-            (b'\x01\x52\x31\x02\x43\x55\x52\x52\x45\x28\x29\x03\x5A', 19),  # Current
-            (b'\x01\x52\x31\x02\x50\x4F\x57\x45\x50\x28\x29\x03\x64', 21),  # Power
-            (b'\x01\x52\x31\x02\x46\x52\x45\x51\x55\x28\x29\x03\x5C', 19),  # Frequency
-            (b'\x01\x52\x31\x02\x45\x54\x30\x50\x45\x28\x29\x03\x37', 64),  # Total energy
-            (b'\x01\x42\x30\x03\x75', 1),  # Close session
         ]
+        for command, expected_len in requests:
+            response = self.send_command(command, expected_len)
+            if response == '\x06':
+                state_session = True
+            else:
+                state_session = False
 
-        for request, expected_len in requests:
-            response = self.send_receive(self.serial_conn, request, expected_len)
-            self.parse_response(response)
+    def execute_close_session(self):
+        """Close the session with the meter."""
+        _LOGGER.debug("Closing session with the meter")
+        command = b'\x01\x42\x30\x03\x75'  # Close session
+        self.send_command(command, 1)
 
-    def send_receive(self, ser, request, expected_len):
-        """Send a request to the meter and receive the response."""
-        ser.write(request)
-        time.sleep(0.3)
-        return ser.read(expected_len)
-
-    def parse_response(self, response):
-        """Parse the received response and extract measurement data."""
-        response_str = response.decode('ascii', errors='ignore')
-        if "VOLTA" in response_str:
-            match = re.search(r'VOLTA\(([\d.]+)\)', response_str)
-            if match:
-                self.U = float(match.group(1))
-        elif "CURRE" in response_str:
-            match = re.search(r'CURRE\(([\d.]+)\)', response_str)
-            if match:
-                self.I = float(match.group(1))
-        elif "POWEP" in response_str:
-            match = re.search(r'POWEP\(([\d.]+)\)', response_str)
-            if match:
-                self.P = float(match.group(1))
-        elif "FREQU" in response_str:
-            match = re.search(r'FREQU\(([\d.]+)\)', response_str)
-            if match:
-                self.F = float(match.group(1))
-        elif "ET0PE" in response_str:
-            match = re.search(r'ET0PE\(([\d.]+)\)', response_str)
-            if match:
-                self.T = float(match.group(1))
+    def update(self):
+        """Update the meter connection."""
+        _LOGGER.debug(f'Update the meter connection port. - {self.port}')
+        if not self.serial_conn:
+            self.serial_conn = self.init_serial_connection()
+            _LOGGER.debug(f'Update the meter connection port serial_conn. - {self.serial_conn}')
