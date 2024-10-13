@@ -1,6 +1,7 @@
 import logging
 import serial
 import time
+from datetime import datetime, timedelta
 import re
 import voluptuous as vol
 import serial.tools.list_ports
@@ -70,6 +71,20 @@ SENSOR_TYPES = {
         "name": "Total Energy",
         "command": b'\x01\x52\x31\x02\x45\x54\x30\x50\x45\x28\x29\x03\x37',
         "regex": r'ET0PE\(([\d.]+)\)',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "day_energy": {
+        "name": "Energomera last day energy",
+        "command": b'',  # Команда будет динамически изменена в коде
+        "regex": r'EADPE\(([\d.]+)\)',  # Регулярное выражение для обработки ответа
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "monthly_energy": {
+        "name": "Energomera last month energy",
+        "command": b'',  # Команда будет динамически изменена в коде
+        "regex": r'EAMPE\(([\d.]+)\)',  # Регулярное выражение для обработки ответа
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
@@ -149,6 +164,23 @@ async def async_setup_platform(
     async_track_time_interval(hass, async_update_data, scan_interval)
 
 
+def get_prev_day():
+    """Get the previous day."""
+    today = datetime.today()
+    previous_day = today - timedelta(days=1)
+    previous_day_str = previous_day.strftime('%d.%m.%y')
+    return previous_day_str
+
+
+def get_prev_month():
+    """Get the previous month."""
+    today = datetime.today()
+    first_day_of_prev_month = today.replace(day=1)
+    last_day_of_previous_month = first_day_of_prev_month - timedelta(days=1)
+    previous_month = last_day_of_previous_month.strftime('%m.%y')
+    return previous_month
+
+
 class EnergomeraSensor(SensorEntity):
     """Representation of a Energomera Sensor."""
 
@@ -177,7 +209,7 @@ class EnergomeraSensor(SensorEntity):
         self._state_class = state_class
         self._precision = precision
         self._state = None
-        _LOGGER.warning(f'init class EnergomeraSensor')
+
     @property
     def name(self):
         """Return the name of the sensor."""
@@ -217,9 +249,24 @@ class EnergomeraSensor(SensorEntity):
         """Fetch new state data for the sensor."""
         self._meter.execute_open_session()
 
+        if self._name == "Energomera last month energy":
+            prev_month = get_prev_month()
+            if prev_month:
+                month_hex = ''.join(f'{ord(c):02X}' for c in prev_month)
+                self._command = b'\x01\x52\x31\x02\x45\x41\x4D\x50\x45\x28' + bytes.fromhex(month_hex) + \
+                                b'\x29\x03\x3E'
+            else:
+                _LOGGER.warning(f"Could not retrieve current month for sensor {self._name}")
+                return
+        elif self._name == "Energomera last day energy":
+            prev_day = get_prev_day()
+            if prev_day:
+                day_hex = ''.join(f'{ord(c):02X}' for c in prev_day)
+                self._command = b'\x01\x52\x31\x02\x45\x41\x44\x50\x45\x28' + bytes.fromhex(day_hex) + \
+                                b'\x29\x03\x3E'
+
         response = self._meter.send_command(self._command)
-        _LOGGER.debug(f"Command for sensor {self._command}")
-        _LOGGER.debug(f"len of command - {response}")
+        _LOGGER.warning(f"response - {response}")
         if response:
             match = re.search(self._regex, response)
             if match:
@@ -240,8 +287,6 @@ class MeterConnection:
     def __init__(self, port):
         self.port = port
         self.serial_conn = self.init_serial_connection()
-        _LOGGER.warning(f'init class meterConnection')
-
     def init_serial_connection(self):
         """Initialize serial connection to the meter."""
         try:
@@ -267,8 +312,8 @@ class MeterConnection:
             self.serial_conn.write(command)
             time.sleep(0.3)  # Небольшая задержка для получения ответа
             response = self.serial_conn.read(expected_len).decode('ascii')
-            _LOGGER.debug(f'Sent command: {command}')
-            _LOGGER.debug(f'Received response: {response}')
+            _LOGGER.warning(f'Sent command: {command}')
+            _LOGGER.warning(f'Received response: {response}')
             return response
         except serial.SerialTimeoutException:
             _LOGGER.error("Timeout communicating with meter")
