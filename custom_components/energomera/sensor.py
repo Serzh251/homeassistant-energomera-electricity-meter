@@ -26,6 +26,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 
+from .services import generate_command
 from .const import (
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
@@ -33,6 +34,7 @@ from .const import (
     CONF_SENSORS,
     CONF_PORT,
     CONF_PRECISION,
+    COMMAND_GET_DAILY_ENERGY, COMMAND_GET_MONTHLY_ENERGY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -252,21 +254,16 @@ class EnergomeraSensor(SensorEntity):
         if self._name == "Energomera last month energy":
             prev_month = get_prev_month()
             if prev_month:
-                month_hex = ''.join(f'{ord(c):02X}' for c in prev_month)
-                self._command = b'\x01\x52\x31\x02\x45\x41\x4D\x50\x45\x28' + bytes.fromhex(month_hex) + \
-                                b'\x29\x03\x3E'
+                self._command = generate_command(prev_month, COMMAND_GET_MONTHLY_ENERGY)
             else:
                 _LOGGER.warning(f"Could not retrieve current month for sensor {self._name}")
                 return
         elif self._name == "Energomera last day energy":
             prev_day = get_prev_day()
             if prev_day:
-                day_hex = ''.join(f'{ord(c):02X}' for c in prev_day)
-                self._command = b'\x01\x52\x31\x02\x45\x41\x44\x50\x45\x28' + bytes.fromhex(day_hex) + \
-                                b'\x29\x03\x3E'
+                self._command = generate_command(prev_day, COMMAND_GET_DAILY_ENERGY)
 
         response = self._meter.send_command(self._command)
-        _LOGGER.warning(f"response - {response}")
         if response:
             match = re.search(self._regex, response)
             if match:
@@ -287,6 +284,7 @@ class MeterConnection:
     def __init__(self, port):
         self.port = port
         self.serial_conn = self.init_serial_connection()
+
     def init_serial_connection(self):
         """Initialize serial connection to the meter."""
         try:
@@ -312,8 +310,8 @@ class MeterConnection:
             self.serial_conn.write(command)
             time.sleep(0.3)  # Небольшая задержка для получения ответа
             response = self.serial_conn.read(expected_len).decode('ascii')
-            _LOGGER.warning(f'Sent command: {command}')
-            _LOGGER.warning(f'Received response: {response}')
+            _LOGGER.debug(f'Sent command: {command}')
+            _LOGGER.debug(f'Received response: {response}')
             return response
         except serial.SerialTimeoutException:
             _LOGGER.error("Timeout communicating with meter")
