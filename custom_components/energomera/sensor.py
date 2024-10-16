@@ -92,7 +92,6 @@ SENSOR_TYPES = {
     },
 }
 
-
 SENSOR_SCHEMA = vol.Schema(
     {
         vol.Required("type"): vol.In(SENSOR_TYPES.keys()),
@@ -103,7 +102,6 @@ SENSOR_SCHEMA = vol.Schema(
         vol.Optional(CONF_PRECISION, default=2): cv.positive_int,
     }
 )
-
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -158,9 +156,7 @@ async def async_setup_platform(
 
     async def async_update_data(now):
         """Fetch data from the meter."""
-        await hass.async_add_executor_job(meter.update)
-        for entity in entities:
-            entity.async_schedule_update_ha_state(True)
+        await hass.async_add_executor_job(meter.update, entities)
 
     # Schedule updates
     async_track_time_interval(hass, async_update_data, scan_interval)
@@ -247,10 +243,8 @@ class EnergomeraSensor(SensorEntity):
         """Return the state class."""
         return self._state_class
 
-    def update(self):
+    def update(self, open_session=False):
         """Fetch new state data for the sensor."""
-        self._meter.execute_open_session()
-
         if self._name == "Energomera last month energy":
             prev_month = get_prev_month()
             if prev_month:
@@ -272,9 +266,6 @@ class EnergomeraSensor(SensorEntity):
                 _LOGGER.warning("No matching data for sensor %s", self._name)
         else:
             _LOGGER.warning("No response for sensor %s", self._name)
-
-        # Закрываем сессию после завершения считывания данных
-        self._meter.execute_close_session()
 
 
 class MeterConnection:
@@ -317,9 +308,37 @@ class MeterConnection:
             _LOGGER.error("Timeout communicating with meter")
             return None
 
+    def send_command(self, command, expected_len=100):
+        """Send a command to the meter and return the response."""
+        if not self.serial_conn or not self.serial_conn.is_open:
+            _LOGGER.error("Serial connection is not open or available.")
+            return None
+
+        try:
+            self.serial_conn.write(command)
+            time.sleep(0.3)  # Небольшая задержка для получения ответа
+            response = self.serial_conn.read(expected_len)
+            if response:
+                return response.decode('ascii')
+            else:
+                _LOGGER.warning("No data received from the meter.")
+                return None
+        except serial.SerialException as e:
+            _LOGGER.error(f"Error communicating with the meter: {e}")
+            return None
+
     def execute_open_session(self):
         """Open the session with the meter and authenticate."""
         _LOGGER.debug("Opening session with the meter")
+
+        # Закрываем порт, если он уже открыт
+        if self.serial_conn and self.serial_conn.is_open:
+            self.serial_conn.close()
+            time.sleep(1)
+
+        # Пытаемся снова открыть соединение
+        self.serial_conn.open()
+
         requests = [
             (b'\x2F\x3F\x21\x0D\x0A', 17),  # Open session
             (b'\x06\x30\x35\x31\x0D\x0A', 11),  # .051..
@@ -328,19 +347,24 @@ class MeterConnection:
         for command, expected_len in requests:
             response = self.send_command(command, expected_len)
             if response == '\x06':
-                state_session = True
+                self.state_session = True
             else:
-                state_session = False
+                self.state_session = False
 
     def execute_close_session(self):
         """Close the session with the meter."""
         _LOGGER.debug("Closing session with the meter")
-        command = b'\x01\x42\x30\x03\x75'  # Close session
-        self.send_command(command, 1)
+        if self.serial_conn and self.serial_conn.is_open:
+            command = b'\x01\x42\x30\x03\x75'  # Close session
+            self.send_command(command, 1)
+            self.serial_conn.close()
 
-    def update(self):
-        """Update the meter connection."""
-        _LOGGER.debug(f'Update the meter connection port. - {self.port}')
-        if not self.serial_conn:
-            self.serial_conn = self.init_serial_connection()
-            _LOGGER.debug(f'Update the meter connection port serial_conn. - {self.serial_conn}')
+    def update(self, sensors):
+        """Open session, fetch data from all sensors, and close session."""
+        self.execute_open_session()
+
+        if self.state_session:
+            for sensor in sensors:
+                sensor.update(open_session=True)
+
+        self.execute_close_session()
