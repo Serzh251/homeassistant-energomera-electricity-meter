@@ -1,7 +1,6 @@
 import logging
 import serial
 import time
-from datetime import datetime, timedelta
 import re
 import voluptuous as vol
 import serial.tools.list_ports
@@ -26,7 +25,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 
-from .services import generate_command
+from .services import generate_command, get_prev_month, get_prev_day
 from .const import (
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
@@ -92,6 +91,7 @@ SENSOR_TYPES = {
     },
 }
 
+
 SENSOR_SCHEMA = vol.Schema(
     {
         vol.Required("type"): vol.In(SENSOR_TYPES.keys()),
@@ -102,6 +102,7 @@ SENSOR_SCHEMA = vol.Schema(
         vol.Optional(CONF_PRECISION, default=2): cv.positive_int,
     }
 )
+
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -122,8 +123,8 @@ async def async_setup_platform(
     port = config[CONF_PORT]
     scan_interval = config[CONF_SCAN_INTERVAL]
     sensors = config[CONF_SENSORS]
-
-    meter = MeterConnection(port)
+    total_sensors = len(sensors)  # Подсчитываем количество сенсоров
+    meter = MeterConnection(port, total_sensors)
     entities = []
     for sensor_conf in sensors:
         sensor_type = sensor_conf["type"]
@@ -156,27 +157,12 @@ async def async_setup_platform(
 
     async def async_update_data(now):
         """Fetch data from the meter."""
-        await hass.async_add_executor_job(meter.update, entities)
+        await hass.async_add_executor_job(meter.update)
+        for entity in entities:
+            entity.async_schedule_update_ha_state(True)
 
     # Schedule updates
     async_track_time_interval(hass, async_update_data, scan_interval)
-
-
-def get_prev_day():
-    """Get the previous day."""
-    today = datetime.today()
-    previous_day = today - timedelta(days=1)
-    previous_day_str = previous_day.strftime('%d.%m.%y')
-    return previous_day_str
-
-
-def get_prev_month():
-    """Get the previous month."""
-    today = datetime.today()
-    first_day_of_prev_month = today.replace(day=1)
-    last_day_of_previous_month = first_day_of_prev_month - timedelta(days=1)
-    previous_month = last_day_of_previous_month.strftime('%m.%y')
-    return previous_month
 
 
 class EnergomeraSensor(SensorEntity):
@@ -243,8 +229,11 @@ class EnergomeraSensor(SensorEntity):
         """Return the state class."""
         return self._state_class
 
-    def update(self, open_session=False):
+    def update(self):
         """Fetch new state data for the sensor."""
+        if not self._meter.session_opened:
+            self._meter.execute_open_session()
+
         if self._name == "Energomera last month energy":
             prev_month = get_prev_month()
             if prev_month:
@@ -267,13 +256,22 @@ class EnergomeraSensor(SensorEntity):
         else:
             _LOGGER.warning("No response for sensor %s", self._name)
 
+        self._meter.polled_sensors_count += 1
+
+        # Закрываем сессию после опроса всех сенсоров
+        if self._meter.polled_sensors_count >= self._meter.total_sensors:
+            self._meter.execute_close_session()
+            self._meter.polled_sensors_count = 0
+
 
 class MeterConnection:
     """Handle communication with the Energomera meter."""
-    state_session = False
+    session_opened = False  # Статус сессии
+    polled_sensors_count = 0  # Счетчик опрошенных сенсоров
 
-    def __init__(self, port):
+    def __init__(self, port, total_sensors):
         self.port = port
+        self.total_sensors = total_sensors
         self.serial_conn = self.init_serial_connection()
 
     def init_serial_connection(self):
@@ -308,37 +306,9 @@ class MeterConnection:
             _LOGGER.error("Timeout communicating with meter")
             return None
 
-    def send_command(self, command, expected_len=100):
-        """Send a command to the meter and return the response."""
-        if not self.serial_conn or not self.serial_conn.is_open:
-            _LOGGER.error("Serial connection is not open or available.")
-            return None
-
-        try:
-            self.serial_conn.write(command)
-            time.sleep(0.3)  # Небольшая задержка для получения ответа
-            response = self.serial_conn.read(expected_len)
-            if response:
-                return response.decode('ascii')
-            else:
-                _LOGGER.warning("No data received from the meter.")
-                return None
-        except serial.SerialException as e:
-            _LOGGER.error(f"Error communicating with the meter: {e}")
-            return None
-
     def execute_open_session(self):
         """Open the session with the meter and authenticate."""
         _LOGGER.debug("Opening session with the meter")
-
-        # Закрываем порт, если он уже открыт
-        if self.serial_conn and self.serial_conn.is_open:
-            self.serial_conn.close()
-            time.sleep(1)
-
-        # Пытаемся снова открыть соединение
-        self.serial_conn.open()
-
         requests = [
             (b'\x2F\x3F\x21\x0D\x0A', 17),  # Open session
             (b'\x06\x30\x35\x31\x0D\x0A', 11),  # .051..
@@ -346,25 +316,21 @@ class MeterConnection:
         ]
         for command, expected_len in requests:
             response = self.send_command(command, expected_len)
-            if response == '\x06':
-                self.state_session = True
-            else:
-                self.state_session = False
+        self.session_opened = True
+
+        _LOGGER.debug("Session opened.")
 
     def execute_close_session(self):
         """Close the session with the meter."""
         _LOGGER.debug("Closing session with the meter")
-        if self.serial_conn and self.serial_conn.is_open:
-            command = b'\x01\x42\x30\x03\x75'  # Close session
-            self.send_command(command, 1)
-            self.serial_conn.close()
+        command = b'\x01\x42\x30\x03\x75'  # Close session
+        self.send_command(command, 1)
+        self.session_opened = False
+        _LOGGER.debug("Session closed.")
 
-    def update(self, sensors):
-        """Open session, fetch data from all sensors, and close session."""
-        self.execute_open_session()
-
-        if self.state_session:
-            for sensor in sensors:
-                sensor.update(open_session=True)
-
-        self.execute_close_session()
+    def update(self):
+        """Update the meter connection."""
+        _LOGGER.debug(f'Update the meter connection port. - {self.port}')
+        if not self.serial_conn:
+            self.serial_conn = self.init_serial_connection()
+            _LOGGER.debug(f'Update the meter connection port serial_conn. - {self.serial_conn}')
