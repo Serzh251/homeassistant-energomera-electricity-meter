@@ -25,7 +25,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 
-from .services import generate_command, get_prev_month, get_prev_day
+from .services import generate_command, get_prev_month, get_prev_day, DTOEnergy, DTOEnergyDay, DTOEnergyMonthly
 from .const import (
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
@@ -75,22 +75,49 @@ SENSOR_TYPES = {
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
-    "day_energy": {
+    "day_energy_total": {
         "name": "Energomera last day energy",
         "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'EADPE\(([\d.]+)\)',  # Регулярное выражение для обработки ответа
+        "regex": r'',  # Регулярное выражение для всех трёх значений
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
-    "monthly_energy": {
+    "day_energy_t1": {
+        "name": "Energomera day energy tariff 1",
+        "command": b'',  # Использует ту же команду, что и основной сенсор
+        "regex": r'',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "day_energy_t2": {
+        "name": "Energomera day energy tariff 2",
+        "command": b'',  # Использует ту же команду, что и основной сенсор
+        "regex": r'',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "monthly_energy_total": {
         "name": "Energomera last month energy",
         "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'EAMPE\(([\d.]+)\)',  # Регулярное выражение для обработки ответа
+        "regex": r'',  # Регулярное выражение для месячных данных
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "monthly_energy_t1": {
+        "name": "Energomera last month energy",
+        "command": b'',  # Команда будет динамически изменена в коде
+        "regex": r'',  # Регулярное выражение для месячных данных
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "monthly_energy_t2": {
+        "name": "Energomera last month energy",
+        "command": b'',  # Команда будет динамически изменена в коде
+        "regex": r'',  # Регулярное выражение для месячных данных
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
 }
-
 
 SENSOR_SCHEMA = vol.Schema(
     {
@@ -102,7 +129,6 @@ SENSOR_SCHEMA = vol.Schema(
         vol.Optional(CONF_PRECISION, default=2): cv.positive_int,
     }
 )
-
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -146,6 +172,7 @@ async def async_setup_platform(
                 unique_id,
                 sensor_info["command"],
                 sensor_info["regex"],
+                sensor_type,
                 unit,
                 device_class,
                 state_class,
@@ -176,6 +203,7 @@ class EnergomeraSensor(SensorEntity):
             unique_id,
             command,
             regex,
+            sensor_type,
             unit,
             device_class,
             state_class,
@@ -188,6 +216,7 @@ class EnergomeraSensor(SensorEntity):
         self._unique_id = unique_id
         self._command = command
         self._regex = regex
+        self._sensor_type = sensor_type
         self._unit = unit
         self._device_class = device_class
         self._state_class = state_class
@@ -233,31 +262,42 @@ class EnergomeraSensor(SensorEntity):
         """Fetch new state data for the sensor."""
         if not self._meter.session_opened:
             self._meter.execute_open_session()
-
         if self._name == "Energomera last month energy":
-            prev_month = get_prev_month()
-            if prev_month:
-                self._command = generate_command(prev_month, COMMAND_GET_MONTHLY_ENERGY)
-            else:
-                _LOGGER.warning(f"Could not retrieve current month for sensor {self._name}")
-                return
+            self._command = generate_command(get_prev_month(), COMMAND_GET_MONTHLY_ENERGY)
         elif self._name == "Energomera last day energy":
-            prev_day = get_prev_day()
-            if prev_day:
-                self._command = generate_command(prev_day, COMMAND_GET_DAILY_ENERGY)
+            self._command = generate_command(get_prev_day(), COMMAND_GET_DAILY_ENERGY)
 
-        response = self._meter.send_command(self._command)
-        if response:
-            match = re.search(self._regex, response)
-            if match:
-                self._state = round(float(match.group(1)), self._precision)
+        if "energy_t1" not in self._sensor_type and "energy_t2" not in self._sensor_type:
+            response = self._meter.send_command(self._command)
+            if response:
+                if self._sensor_type == "day_energy_total":
+                    self._meter.parse_day_energy_response(response)
+                    self._state = round(self._meter.parsed_day_energy.total, self._precision)
+
+                elif self._sensor_type == "monthly_energy_total":
+                    self._meter.parse_monthly_energy_response(response)
+                    self._state = round(self._meter.parsed_monthly_energy.total, self._precision)
+
+                else:
+                    match = re.search(self._regex, response)
+                    if match:
+                        self._state = round(float(match.group(1)), self._precision)
+                    else:
+                        _LOGGER.warning(f"No matching data for sensor {self._sensor_type}")
             else:
-                _LOGGER.warning("No matching data for sensor %s", self._name)
+                _LOGGER.warning(f"No response for sensor  {self._sensor_type}")
         else:
-            _LOGGER.warning("No response for sensor %s", self._name)
+            if self._sensor_type == "day_energy_t1":
+                self._state = round(self._meter.parsed_day_energy.t1, self._precision)
+            elif self._sensor_type == "day_energy_t2":
+                self._state = round(self._meter.parsed_day_energy.t2, self._precision)
+
+            elif self._sensor_type == "monthly_energy_t1":
+                self._state = round(self._meter.parsed_monthly_energy.t1, self._precision)
+            elif self._sensor_type == "monthly_energy_t2":
+                self._state = round(self._meter.parsed_monthly_energy.t2, self._precision)
 
         self._meter.polled_sensors_count += 1
-
         # Закрываем сессию после опроса всех сенсоров
         if self._meter.polled_sensors_count >= self._meter.total_sensors:
             self._meter.execute_close_session()
@@ -268,6 +308,37 @@ class MeterConnection:
     """Handle communication with the Energomera meter."""
     session_opened = False  # Статус сессии
     polled_sensors_count = 0  # Счетчик опрошенных сенсоров
+    parsed_day_energy = DTOEnergyDay()
+    parsed_monthly_energy = DTOEnergyMonthly()
+    parsed_energy = DTOEnergy()
+
+    def parse_day_energy_response(self, response):
+        try:
+            matches = re.findall(r'(?<=\()\d+\.\d+(?=\))', response)
+            if matches and len(matches) > 3:
+                self.parsed_day_energy = DTOEnergyDay(total=float(matches[0]), t1=float(matches[1]),
+                                                      t2=float(matches[2]))
+            else:
+                self.parsed_day_energy = None
+                _LOGGER.warning("Could not parse day energy data")
+
+        except Exception as e:
+            self.parsed_day_energy = None
+            _LOGGER.error(f"Error parsing day energy response: {e}")
+
+    def parse_monthly_energy_response(self, response):
+        try:
+            matches = re.findall(r'(?<=\()\d+\.\d+(?=\))', response)
+            if matches and len(matches) > 3:
+                self.parsed_monthly_energy = DTOEnergyMonthly(total=float(matches[0]), t1=float(matches[1]),
+                                                              t2=float(matches[2]))
+            else:
+                self.parsed_monthly_energy = None
+                _LOGGER.warning("Could not parse monthly energy data")
+
+        except Exception as e:
+            self.parsed_monthly_energy = None
+            _LOGGER.error(f"Error parsing monthly energy response: {e}")
 
     def __init__(self, port, total_sensors):
         self.port = port
@@ -290,7 +361,7 @@ class MeterConnection:
             _LOGGER.error("Error opening serial port %s: %s", self.port, e)
             return None
 
-    def send_command(self, command, expected_len=100):
+    def send_command(self, command, expected_len=150):
         """Send a command to the meter and return the response."""
         if not self.serial_conn:
             return None
