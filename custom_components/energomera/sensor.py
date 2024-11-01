@@ -27,13 +27,12 @@ from homeassistant.components.sensor import (
 
 from .services import generate_command, get_prev_month, get_prev_day, DTOEnergy, DTOEnergyDay, DTOEnergyMonthly
 from .const import (
-    DOMAIN,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_PORT,
     CONF_SENSORS,
     CONF_PORT,
     CONF_PRECISION,
-    COMMAND_GET_DAILY_ENERGY, COMMAND_GET_MONTHLY_ENERGY,
+    COMMAND_GET_DAILY_ENERGY, COMMAND_GET_MONTHLY_ENERGY, commands_for_open_sessions, command_for_close_session,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,45 +74,59 @@ SENSOR_TYPES = {
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
+    "total_energy_t1": {
+        "name": "Energomera total energy tariff 1",
+        "command": b'',
+        "regex": r'',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
+    "total_energy_t2": {
+        "name": "Energomera total energy tariff 2",
+        "command": b'',
+        "regex": r'',
+        "unit": UnitOfEnergy.KILO_WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY,
+    },
     "day_energy_total": {
         "name": "Energomera last day energy",
-        "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'',  # Регулярное выражение для всех трёх значений
+        "command": b'',
+        "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
     "day_energy_t1": {
         "name": "Energomera day energy tariff 1",
-        "command": b'',  # Использует ту же команду, что и основной сенсор
+        "command": b'',
         "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
     "day_energy_t2": {
         "name": "Energomera day energy tariff 2",
-        "command": b'',  # Использует ту же команду, что и основной сенсор
+        "command": b'',
         "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
     "monthly_energy_total": {
         "name": "Energomera last month energy",
-        "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'',  # Регулярное выражение для месячных данных
+        "command": b'',
+        "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
     "monthly_energy_t1": {
         "name": "Energomera last month energy",
-        "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'',  # Регулярное выражение для месячных данных
+        "command": b'',
+        "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
     "monthly_energy_t2": {
         "name": "Energomera last month energy",
-        "command": b'',  # Команда будет динамически изменена в коде
-        "regex": r'',  # Регулярное выражение для месячных данных
+        "command": b'',
+        "regex": r'',
         "unit": UnitOfEnergy.KILO_WATT_HOUR,
         "device_class": SensorDeviceClass.ENERGY,
     },
@@ -149,7 +162,7 @@ async def async_setup_platform(
     port = config[CONF_PORT]
     scan_interval = config[CONF_SCAN_INTERVAL]
     sensors = config[CONF_SENSORS]
-    total_sensors = len(sensors)  # Подсчитываем количество сенсоров
+    total_sensors = len(sensors)  # Counting the number of sensors to open and close a session after polling all sensors
     meter = MeterConnection(port, total_sensors)
     entities = []
     for sensor_conf in sensors:
@@ -262,11 +275,15 @@ class EnergomeraSensor(SensorEntity):
         """Fetch new state data for the sensor."""
         if not self._meter.session_opened:
             self._meter.execute_open_session()
-        if self._name == "Energomera last month energy":
+        if self._sensor_type == "monthly_energy_total":  # forming command for monthly energy sensors
             self._command = generate_command(get_prev_month(), COMMAND_GET_MONTHLY_ENERGY)
-        elif self._name == "Energomera last day energy":
+        elif self._sensor_type == "day_energy_total":  # forming command for day energy sensors
             self._command = generate_command(get_prev_day(), COMMAND_GET_DAILY_ENERGY)
 
+        """
+        for sensors with T1 and T2 tarifs no need send request to electric meter. this data electric meter send with
+        total day, monthly and total energy and then energy for T1 and T2 parse and saving in DTO objects
+        """
         if "energy_t1" not in self._sensor_type and "energy_t2" not in self._sensor_type:
             response = self._meter.send_command(self._command)
             if response:
@@ -277,6 +294,10 @@ class EnergomeraSensor(SensorEntity):
                 elif self._sensor_type == "monthly_energy_total":
                     self._meter.parse_monthly_energy_response(response)
                     self._state = round(self._meter.parsed_monthly_energy.total, self._precision)
+
+                elif self._sensor_type == "total_energy":
+                    self._meter.parse_energy_response(response)
+                    self._state = round(self._meter.parsed_energy.total, self._precision)
 
                 else:
                     match = re.search(self._regex, response)
@@ -297,8 +318,13 @@ class EnergomeraSensor(SensorEntity):
             elif self._sensor_type == "monthly_energy_t2":
                 self._state = round(self._meter.parsed_monthly_energy.t2, self._precision)
 
+            elif self._sensor_type == "total_energy_t1":
+                self._state = round(self._meter.parsed_energy.t1, self._precision)
+            elif self._sensor_type == "total_energy_t2":
+                self._state = round(self._meter.parsed_energy.t2, self._precision)
+
         self._meter.polled_sensors_count += 1
-        # Закрываем сессию после опроса всех сенсоров
+        # close session after polling all sensors
         if self._meter.polled_sensors_count >= self._meter.total_sensors:
             self._meter.execute_close_session()
             self._meter.polled_sensors_count = 0
@@ -306,8 +332,8 @@ class EnergomeraSensor(SensorEntity):
 
 class MeterConnection:
     """Handle communication with the Energomera meter."""
-    session_opened = False  # Статус сессии
-    polled_sensors_count = 0  # Счетчик опрошенных сенсоров
+    session_opened = False  # state session
+    polled_sensors_count = 0
     parsed_day_energy = DTOEnergyDay()
     parsed_monthly_energy = DTOEnergyMonthly()
     parsed_energy = DTOEnergy()
@@ -340,6 +366,21 @@ class MeterConnection:
             self.parsed_monthly_energy = None
             _LOGGER.error(f"Error parsing monthly energy response: {e}")
 
+    def parse_energy_response(self, response):
+        try:
+            matches = re.findall(r'(?<=\()\d+\.\d+(?=\))', response)
+            if matches and len(matches) > 3:
+                self.parsed_energy = DTOEnergy(total=float(matches[0]), t1=float(matches[1]),
+                                               t2=float(matches[2]))
+                _LOGGER.warning(f"DTOEnergy>>>>>>{DTOEnergy}")
+            else:
+                self.parsed_energy = None
+                _LOGGER.warning("Could not parse energy data")
+
+        except Exception as e:
+            self.parsed_energy = None
+            _LOGGER.error(f"Error parsing energy response: {e}")
+
     def __init__(self, port, total_sensors):
         self.port = port
         self.total_sensors = total_sensors
@@ -358,7 +399,7 @@ class MeterConnection:
             )
             return ser
         except serial.SerialException as e:
-            _LOGGER.error("Error opening serial port %s: %s", self.port, e)
+            _LOGGER.error(f"Error opening serial port {self.port}: {e}")
             return None
 
     def send_command(self, command, expected_len=150):
@@ -368,7 +409,7 @@ class MeterConnection:
 
         try:
             self.serial_conn.write(command)
-            time.sleep(0.3)  # Небольшая задержка для получения ответа
+            time.sleep(0.3)  # for getting response
             response = self.serial_conn.read(expected_len).decode('ascii')
             _LOGGER.debug(f'Sent command: {command}')
             _LOGGER.debug(f'Received response: {response}')
@@ -380,22 +421,16 @@ class MeterConnection:
     def execute_open_session(self):
         """Open the session with the meter and authenticate."""
         _LOGGER.debug("Opening session with the meter")
-        requests = [
-            (b'\x2F\x3F\x21\x0D\x0A', 17),  # Open session
-            (b'\x06\x30\x35\x31\x0D\x0A', 11),  # .051..
-            (b'\x01\x50\x31\x02\x28\x37\x37\x37\x37\x37\x37\x29\x03\x21', 1),  # Auth
-        ]
-        for command, expected_len in requests:
+        for command, expected_len in commands_for_open_sessions:
             response = self.send_command(command, expected_len)
         self.session_opened = True
-
         _LOGGER.debug("Session opened.")
 
     def execute_close_session(self):
         """Close the session with the meter."""
         _LOGGER.debug("Closing session with the meter")
-        command = b'\x01\x42\x30\x03\x75'  # Close session
-        self.send_command(command, 1)
+
+        self.send_command(command_for_close_session, 1)
         self.session_opened = False
         _LOGGER.debug("Session closed.")
 

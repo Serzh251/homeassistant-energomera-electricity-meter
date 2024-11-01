@@ -6,6 +6,5 @@
   "requirements": ["pyserial==3.5"],
   "dependencies": [],
   "codeowners": ["@Serzh251"],
-  "iot_class": "local_polling",
-  "logo": "/custom_components/energomera/logo.png"
+  "iot_class": "local_polling"
 }
