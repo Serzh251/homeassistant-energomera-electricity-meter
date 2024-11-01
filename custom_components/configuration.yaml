@@ -1,0 +1,69 @@
+sensor:
+  - platform: energomera
+    scan_interval: 60
+    port: /dev/ttyUSB0
+      - type: voltage
+        name: "Energomera Voltage"
+        friendly_name: "Voltage energomera"
+        unique_id: "voltage_energomera"
+        precision: 1
+      - type: current
+        name: "Energomera current"
+        friendly_name: "Currentge energomera"
+        unique_id: "current_energomera"
+        precision: 3
+      - type: power
+        name: "Energomera power"
+        friendly_name: "Power energomera"
+        unique_id: "power_energomera"
+        precision: 3
+      - type: frequency
+        name: "Energomera frequency"
+        friendly_name: "Frequency energomera"
+        unique_id: "frequency_energomera"
+        precision: 2
+      - type: total_energy
+        name: "Energomera total energy"
+        friendly_name: "Total energy energomera"
+        unique_id: "total_energy_energomera"
+        precision: 2
+      - type: total_energy_t1
+        name: "Energomera energy T1"
+        friendly_name: "Energy total T1"
+        unique_id: "total_energy_energomera_t1"
+        precision: 2
+      - type: total_energy_t2
+        name: "Energomera energy T2"
+        friendly_name: "Energy total T2"
+        unique_id: "total_energy_energomera_t2"
+        precision: 2
+      - type: day_energy_total
+        name: "Energomera last day energy"
+        friendly_name: "Energy for previous day"
+        unique_id: "last_day_energy_energomera"
+        precision: 2
+      - type: day_energy_t1
+        name: "Energomera last day energy T1"
+        friendly_name: "Energy for previous day T1"
+        unique_id: "last_day_energy_energomera_t1"
+        precision: 2
+      - type: day_energy_t2
+        name: "Energomera last day energy T2"
+        friendly_name: "Energy for previous day T2"
+        unique_id: "last_day_energy_energomera_t2"
+        precision: 2
+      - type: monthly_energy_total
+        name: "Energomera last month energy"
+        friendly_name: "Energy for previous month"
+        unique_id: "last_month_energy_energomera"
+        precision: 2
+      - type: monthly_energy_t1
+        name: "Energomera last month energy T1"
+        friendly_name: "Energy for previous month T1"
+        unique_id: "last_month_energy_energomera_t1"
+        precision: 2
+      - type: monthly_energy_t2
+        name: "Energomera last month energy T2"
+        friendly_name: "Energy for previous month T2"
+        unique_id: "last_month_energy_energomera_t2"
+        precision: 2
