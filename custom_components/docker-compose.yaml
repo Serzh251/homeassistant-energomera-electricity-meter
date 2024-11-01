@@ -2,8 +2,8 @@ services:
   homeassistant:
     container_name: homeassistant
     build:
-      context: .  # Указываем, что сборка будет происходить из текущей директории
-      dockerfile: Dockerfile  # Используем наш Dockerfile для сборки
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     privileged: true
     environment:
