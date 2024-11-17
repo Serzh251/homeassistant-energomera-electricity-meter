@@ -1,0 +1,14 @@
+services:
+  homeassistant:
+    container_name: homeassistant
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - "D:/Radio/SmartHome/Home assistant dev/homeassistant-energomera-electricity-meter:/config"
+    ports:
+      - "8123:8123"
